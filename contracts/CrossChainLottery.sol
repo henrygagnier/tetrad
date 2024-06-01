@@ -8,8 +8,14 @@ import {CCIPReceiver} from "@chainlink/contracts-ccip/src/v0.8/ccip/applications
 import {IERC20} from "@chainlink/contracts-ccip/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@chainlink/contracts-ccip/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/utils/SafeERC20.sol";
 
-// DO NOT DEPLOY THIS CONTRACT INTO PRODUCTION, IT IS CURRENTLY BEING WORKED ON FOR BETTER CCIP IMPLEMENTATION
+/**
+ * THIS IS AN EXAMPLE CONTRACT THAT USES HARDCODED VALUES FOR CLARITY.
+ * THIS IS AN EXAMPLE CONTRACT THAT USES UN-AUDITED CODE.
+ * THIS CONTRACT IS NOT FINISHED.
+ * DO NOT USE THIS CODE IN PRODUCTION.
+ */
 
+/// @title - A simple messenger contract for transferring/receiving tokens and data across chains.
 contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
     using SafeERC20 for IERC20;
 
