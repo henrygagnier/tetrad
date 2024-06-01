@@ -5,6 +5,7 @@
     "hardhat": "^2.22.3"
   },
   "dependencies": {
-    "@chainlink/contracts": "^1.1.0"
+    "@chainlink/contracts": "^1.1.0",
+    "@chainlink/contracts-ccip": "^1.4.0"
   }
 }
