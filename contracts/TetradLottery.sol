@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "./IRandomNumberGenerator.sol";
+import "./interfaces/IRandomNumberGenerator.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {Client} from "@chainlink/contracts-ccip@1.4.0/src/v0.8/ccip/libraries/Client.sol";
-import {CCIPReceiver} from "@chainlink/contracts-ccip@1.4.0/src/v0.8/ccip/applications/CCIPReceiver.sol";
-import {IRouterClient} from "@chainlink/contracts-ccip@1.4.0/src/v0.8/ccip/interfaces/IRouterClient.sol";
-import "./IWETH.sol";
+import {Client} from "@chainlink/contracts-ccip/src/v0.8/ccip/libraries/Client.sol";
+import {CCIPReceiver} from "@chainlink/contracts-ccip/src/v0.8/ccip/applications/CCIPReceiver.sol";
+import {IRouterClient} from "@chainlink/contracts-ccip/src/v0.8/ccip/interfaces/IRouterClient.sol";
+import "./interfaces/IWETH.sol";
 
 contract TetradLottery is CCIPReceiver, Ownable {
-
     struct Lottery {
         uint256[6] rewardsPerBracket;
         uint256[6] countWinnersPerBracket;
@@ -26,6 +25,7 @@ contract TetradLottery is CCIPReceiver, Ownable {
     }
 
     struct CCIPData {
+        address user;
         uint256 call;
         uint32[] tickets;
         uint256[] ticketIds;
@@ -41,6 +41,8 @@ contract TetradLottery is CCIPReceiver, Ownable {
     uint256 public price = 500000000000000;
     uint256 currentTicketId;
     uint256 lastLotteryPurchased;
+    address public treasury;
+    uint256 public treasuryFees = 1;
 
     mapping(uint256 => mapping(uint32 => uint256))
         private _numberTicketsPerLotteryId;
@@ -57,35 +59,13 @@ contract TetradLottery is CCIPReceiver, Ownable {
     error LotteryDrawn();
     error TransferFailed();
     error FutureLottery();
-    error NoPlayers();
+    error PreviousLotteryNotDrawn();
     error SourceChainNotAllowlisted(uint64 sourceChainSelector);
     error SenderNotAllowlisted(address sender);
 
     modifier onlyRandomNumberGenerator() {
         if (msg.sender != address(randomNumberGenerator))
             revert NotRandomNumberGenerator();
-        _;
-    }
-
-    function allowlistSourceChain(uint64 _sourceChainSelector, bool allowed)
-        external
-        onlyOwner
-    {
-        allowlistedSourceChains[_sourceChainSelector] = allowed;
-    }
-
-    /// @dev Updates the allowlist status of a sender for transactions.
-    function allowlistSender(address _sender, bool allowed) external onlyOwner {
-        allowlistedSenders[_sender] = allowed;
-    }
-
-    mapping(uint64 => bool) public allowlistedSourceChains;
-    mapping(address => bool) public allowlistedSenders;
-
-    modifier onlyAllowlisted(uint64 _sourceChainSelector, address _sender) {
-        if (!allowlistedSourceChains[_sourceChainSelector])
-            revert SourceChainNotAllowlisted(_sourceChainSelector);
-        if (!allowlistedSenders[_sender]) revert SenderNotAllowlisted(_sender);
         _;
     }
 
@@ -108,10 +88,13 @@ contract TetradLottery is CCIPReceiver, Ownable {
 
     IWETH public WETH;
 
-    constructor(address _randomNumberGenerator, address _router, address _WETH)
-        Ownable(msg.sender)
-        CCIPReceiver(_router)
-    {
+    constructor(
+        address _randomNumberGenerator,
+        address _router,
+        address _WETH,
+        address _treasury
+    ) CCIPReceiver(_router) {
+        treasury = _treasury;
         randomNumberGenerator = IRandomNumberGenerator(_randomNumberGenerator);
 
         bracketCalculator[0] = 1;
@@ -129,31 +112,36 @@ contract TetradLottery is CCIPReceiver, Ownable {
         rewardsBreakdown[5] = 1500;
 
         WETH = IWETH(_WETH);
+        lotteries[(block.timestamp / 24 hours) - 1].finalNumber = 1; //so the real first round can be called
     }
 
-    function buyTicketsWithEther(uint32[] memory _numbers, address _user) external payable {
-        if (_numbers.length == 0) revert InvalidTickets();
-        
+    function buyTicketsWithEther(uint32[] memory _numbers, address _user)
+        external
+        payable
+    {
         uint256 payment = _numbers.length * price;
-        
-        WETH.deposit{value: msg.value}();
 
-        buyTickets(_numbers,_user,payment);
+        WETH.deposit{value: payment}();
+
+        buyTickets(_numbers, _user, payment);
     }
 
-    function buyTicketsWithWETH(uint32[] memory _numbers, address _user) external {
-        if (_numbers.length == 0) revert InvalidTickets();
-        
+    function buyTicketsWithWETH(uint32[] memory _numbers, address _user)
+        external
+    {
         uint256 payment = _numbers.length * price;
         bool sent = WETH.transferFrom(_user, address(this), payment);
         if (!sent) revert("Insufficient payment");
 
-        buyTickets(_numbers,_user,payment);
+        buyTickets(_numbers, _user, payment);
     }
 
-     function buyTickets(uint32[] memory _numbers, address _user, uint256 _payment)
-        internal
-    {
+    function buyTickets(
+        uint32[] memory _numbers,
+        address _user,
+        uint256 _payment
+    ) internal {
+        if (_numbers.length == 0) revert InvalidTickets();
         uint256 id = block.timestamp / 24 hours;
 
         if (lotteries[id].amountCollected == 0) {
@@ -193,10 +181,12 @@ contract TetradLottery is CCIPReceiver, Ownable {
             currentTicketId++;
         }
 
-        
-        if (roundsJoined[_user][roundsJoined[_user].length - 1] != id) {
+        if (
+            roundsJoined[_user].length == 0 ||
+            roundsJoined[_user][roundsJoined[_user].length - 1] != id
+        ) {
             roundsJoined[_user].push(id);
-        } 
+        }
 
         lotteries[id].amountCollected += (_payment);
         lotteries[id].totalAmountCollected += (_payment);
@@ -221,7 +211,7 @@ contract TetradLottery is CCIPReceiver, Ownable {
             uint256 thisTicketId = _ticketIds[i];
 
             require(
-                lotteries[_id].lastTicketId > thisTicketId,
+                lotteries[_id].lastTicketId >= thisTicketId,
                 "TicketId too high"
             );
             require(
@@ -254,36 +244,36 @@ contract TetradLottery is CCIPReceiver, Ownable {
             }
             rewardToTransfer += rewardForTicketId;
         }
-        bool sent = WETH.transfer(msg.sender, rewardToTransfer);
-        if (!sent) revert TransferFailed();
+        bool sent = WETH.transfer(msg.sender, (rewardToTransfer * (10000 - treasuryFees)) / 10000);
+        bool _sent = WETH.transfer(treasury, (rewardToTransfer * treasuryFees) / 10000);
+        if (!sent || !_sent) revert TransferFailed();
 
-        emit TicketsClaim(msg.sender, rewardToTransfer, _id, _ticketIds.length);
+        emit TicketsClaim(msg.sender, (rewardToTransfer * (10000 - treasuryFees)) / 10000, _id, _ticketIds.length);
     }
 
     function _ccipReceive(Client.Any2EVMMessage memory any2EvmMessage)
         internal
         override
-        onlyAllowlisted(
-            any2EvmMessage.sourceChainSelector,
-            abi.decode(any2EvmMessage.sender, (address))
-        )
     {
         CCIPData memory data = abi.decode(any2EvmMessage.data, (CCIPData));
         if (data.call == 0) {
-            require(any2EvmMessage.destTokenAmounts[0].token == address(WETH), "not weth");
+            require(
+                any2EvmMessage.destTokenAmounts[0].token == address(WETH),
+                "Not WETH"
+            );
 
             uint256 payment = data.tickets.length * price;
-            if (data.tickets.length == 0) revert InvalidTickets();
-        if (payment > any2EvmMessage.destTokenAmounts[0].amount) revert InsufficientPayment();
-            
-            buyTickets(data.tickets, abi.decode(any2EvmMessage.sender, (address)), payment);
+            if (payment > any2EvmMessage.destTokenAmounts[0].amount)
+                revert InsufficientPayment();
+
+            buyTickets(data.tickets, data.user, payment);
         } else {
             if (data.call == 1) {
                 claimTicketsCrossChain(
                     data.id,
                     data.ticketIds,
                     data.brackets,
-                    abi.decode(any2EvmMessage.sender, (address)),
+                    data.user,
                     any2EvmMessage.sourceChainSelector
                 );
             }
@@ -309,7 +299,7 @@ contract TetradLottery is CCIPReceiver, Ownable {
             uint256 thisTicketId = _ticketIds[i];
 
             require(
-                lotteries[_id].lastTicketId > thisTicketId,
+                lotteries[_id].lastTicketId >= thisTicketId,
                 "TicketId too high"
             );
             require(
@@ -343,9 +333,11 @@ contract TetradLottery is CCIPReceiver, Ownable {
             rewardToTransfer += rewardForTicketId;
         }
 
-        transferFundsCrossChain(rewardToTransfer, _user, _sourceChain);
+        bool sent = WETH.transfer(treasury, (rewardToTransfer * treasuryFees) / 10000);
+        if (!sent) revert TransferFailed();
+        transferFundsCrossChain((rewardToTransfer * (10000 - treasuryFees)) / 10000, _user, _sourceChain);
 
-        emit TicketsClaim(_user, rewardToTransfer, _id, _ticketIds.length);
+        emit TicketsClaim(_user, (rewardToTransfer * (10000 - treasuryFees)) / 10000, _id, _ticketIds.length);
     }
 
     function transferFundsCrossChain(
@@ -363,9 +355,14 @@ contract TetradLottery is CCIPReceiver, Ownable {
         if (_amount <= fees) revert("Insufficent rewards");
         _amount -= fees;
 
-        IWETH(WETH).withdraw(fees);
+        WETH.approve(address(router), _amount);
 
-        router.ccipSend{value: fees}(_to, createEVM2AnyMessage(_amount, _address));
+        WETH.withdraw(fees);
+
+        router.ccipSend{value: fees}(
+            _to,
+            createEVM2AnyMessage(_amount, _address)
+        );
     }
 
     function createEVM2AnyMessage(uint256 amount, address receiver)
@@ -416,7 +413,8 @@ contract TetradLottery is CCIPReceiver, Ownable {
     function drawLottery(uint256 _id) external {
         if ((block.timestamp / 24 hours) <= _id) revert FutureLottery();
         if (lotteries[_id].finalNumber != 0) revert LotteryDrawn();
-        if (lotteries[_id].amountCollected == 0) revert NoPlayers(); //if there are no participants
+        if (lotteries[_id - 1].finalNumber == 0)
+            revert PreviousLotteryNotDrawn();
 
         lotteries[_id].lastTicketId = currentTicketId - 1;
         randomNumberGenerator.generate(_id);
@@ -494,9 +492,7 @@ contract TetradLottery is CCIPReceiver, Ownable {
         )
     {
         uint256 length = _size;
-        uint256 numberTicketsBoughtAtLotteryId = _userTicketIdsPerLotteryId[
-            _user
-        ][_lotteryId].length;
+        uint256 numberTicketsBoughtAtLotteryId = _userTicketIdsPerLotteryId[_user][_lotteryId].length;
 
         if (length > (numberTicketsBoughtAtLotteryId - _cursor)) {
             length = numberTicketsBoughtAtLotteryId - _cursor;
@@ -507,9 +503,7 @@ contract TetradLottery is CCIPReceiver, Ownable {
         bool[] memory ticketStatuses = new bool[](length);
 
         for (uint256 i = 0; i < length; i++) {
-            lotteryTicketIds[i] = _userTicketIdsPerLotteryId[_user][_lotteryId][
-                i + _cursor
-            ];
+            lotteryTicketIds[i] = _userTicketIdsPerLotteryId[_user][_lotteryId][i + _cursor];
             ticketNumbers[i] = tickets[lotteryTicketIds[i]].number;
 
             // True = ticket claimed
@@ -521,12 +515,7 @@ contract TetradLottery is CCIPReceiver, Ownable {
             }
         }
 
-        return (
-            lotteryTicketIds,
-            ticketNumbers,
-            ticketStatuses,
-            _cursor + length
-        );
+        return (lotteryTicketIds, ticketNumbers, ticketStatuses, _cursor + length);
     }
 
     function viewCurrentLotteryId() external view returns (uint256) {
@@ -540,6 +529,13 @@ contract TetradLottery is CCIPReceiver, Ownable {
         randomNumberGenerator = IRandomNumberGenerator(
             _newRandomNumberGenerator
         );
+    }
+
+    function changeRewardsBreakdown(uint256 _index, uint256 _distribution)
+        external
+        onlyOwner
+    {
+        rewardsBreakdown[_index] = _distribution;
     }
 
     function viewLottery(uint256 _lotteryId)
@@ -556,5 +552,15 @@ contract TetradLottery is CCIPReceiver, Ownable {
         returns (uint256[] memory)
     {
         return (roundsJoined[_user]);
+    }
+
+    function setTreasury(address _treasury) onlyOwner() external {
+        treasury = _treasury;
+    }
+    function setTreasuryFees(uint256 _fees) onlyOwner() external {
+        treasuryFees = _fees;
+    }
+    function setPrice(uint256 _price) onlyOwner() external {
+        price = _price;
     }
 }

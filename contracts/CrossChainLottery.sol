@@ -7,28 +7,16 @@ import {Client} from "@chainlink/contracts-ccip/src/v0.8/ccip/libraries/Client.s
 import {CCIPReceiver} from "@chainlink/contracts-ccip/src/v0.8/ccip/applications/CCIPReceiver.sol";
 import {IERC20} from "@chainlink/contracts-ccip/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@chainlink/contracts-ccip/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/utils/SafeERC20.sol";
+import "./interfaces/IWETH.sol";
 
-/**
- * THIS IS AN EXAMPLE CONTRACT THAT USES HARDCODED VALUES FOR CLARITY.
- * THIS IS AN EXAMPLE CONTRACT THAT USES UN-AUDITED CODE.
- * THIS CONTRACT IS NOT FINISHED.
- * DO NOT USE THIS CODE IN PRODUCTION.
- */
-
-/// @title - A simple messenger contract for transferring/receiving tokens and data across chains.
-contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
+contract TetradLotteryMessenger is CCIPReceiver, OwnerIsCreator {
     using SafeERC20 for IERC20;
 
     // Custom errors to provide more descriptive revert messages.
     error NotEnoughBalance(uint256 currentBalance, uint256 calculatedFees); // Used to make sure contract has enough balance to cover the fees.
-    error NothingToWithdraw(); // Used when trying to withdraw Ether but there's nothing to withdraw.
-    error FailedToWithdrawEth(address owner, address target, uint256 value); // Used when the withdrawal of Ether fails.
-    error DestinationChainNotAllowed(uint64 destinationChainSelector); // Used when the destination chain has not been allowlisted by the contract owner.
-    error SourceChainNotAllowed(uint64 sourceChainSelector); // Used when the source chain has not been allowlisted by the contract owner.
-    error SenderNotAllowed(address sender); // Used when the sender has not been allowlisted by the contract owner.
-    error InvalidReceiverAddress(); // Used when the receiver address is 0.
 
     struct CCIPData {
+        address user;
         uint256 call;
         uint32[] tickets;
         uint256[] ticketIds;
@@ -48,105 +36,66 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
         uint256 fees // The fees paid for sending the message.
     );
 
-    // Event emitted when a message is received from another chain.
-    event MessageReceived(
-        bytes32 indexed messageId, // The unique ID of the CCIP message.
-        uint64 indexed sourceChainSelector, // The chain selector of the source chain.
-        address sender, // The address of the sender from the source chain.
-        CCIPData data, // The text that was received.
-        address token, // The token address that was transferred.
-        uint256 tokenAmount // The token amount that was transferred.
-    );
+    uint64 public destinationChainSelector = 4949039107694359620;
+    IWETH public WETH;
+    address destinationChainContract;
+    mapping(address => bytes32[]) messageIds;
 
-    bytes32 private s_lastReceivedMessageId; // Store the last received messageId.
-    address private s_lastReceivedTokenAddress; // Store the last received token address.
-    uint256 private s_lastReceivedTokenAmount; // Store the last received amount.
-    CCIPData private s_lastReceivedText; // Store the last received text.
-
-    // Mapping to keep track of allowlisted destination chains.
-    mapping(uint64 => bool) public allowlistedDestinationChains;
-
-    // Mapping to keep track of allowlisted source chains.
-    mapping(uint64 => bool) public allowlistedSourceChains;
-
-    // Mapping to keep track of allowlisted senders.
-    mapping(address => bool) public allowlistedSenders;
-
-    uint64 public destinationChainSelector = 3478487238524512106;
-    address public token = 0x8aF4204e30565DF93352fE8E1De78925F6664dA7;
-    address destinationChainContract = 0xA80815BfD81C97119a6868BF4B7029904De15E0C;
-
-    constructor(address _router) CCIPReceiver(_router) {}
-
-    /// @dev Modifier that checks the receiver address is not 0.
-    /// @param destinationChainContract The receiver address.
-    modifier validateReceiver(address destinationChainContract) {
-        if (destinationChainContract == address(0)) revert InvalidReceiverAddress();
-        _;
+    constructor(address _router, address _destinationChainContract, address _WETH)
+        CCIPReceiver(_router)
+    {
+        destinationChainContract = _destinationChainContract;
+        WETH = IWETH(_WETH);
     }
 
-    /// @dev Modifier that checks if the chain with the given sourceChainSelector is allowlisted and if the sender is allowlisted.
-    /// @param _sourceChainSelector The selector of the destination chain.
-    /// @param _sender The address of the sender.
-    modifier onlyAllowlisted(uint64 _sourceChainSelector, address _sender) {
-        if (!allowlistedSourceChains[_sourceChainSelector])
-            revert SourceChainNotAllowed(_sourceChainSelector);
-        if (!allowlistedSenders[_sender]) revert SenderNotAllowed(_sender);
-        _;
+    function buyTicketsWithEther(
+        uint32[] calldata _tickets,
+        uint256 _amount,
+        uint256 _gasLimit,
+        address _user
+    ) external payable returns (bytes32 messageId) {
+        WETH.deposit{value: _amount}();
+        messageId = buyTickets(_tickets, _amount, msg.value - _amount, _gasLimit, _user);
+
+        messageIds[_user].push(messageId);
+        return (messageId);
     }
 
-    /// @dev Updates the allowlist status of a source chain
-    /// @notice This function can only be called by the owner.
-    /// @param _sourceChainSelector The selector of the source chain to be updated.
-    /// @param allowed The allowlist status to be set for the source chain.
-    function allowlistSourceChain(
-        uint64 _sourceChainSelector,
-        bool allowed
-    ) external onlyOwner {
-        allowlistedSourceChains[_sourceChainSelector] = allowed;
-    }
+    function buyTicketsWithWETH(
+        uint32[] calldata _tickets,
+        uint256 _amount,
+        uint256 _gasLimit,
+        address _user
+    ) external payable returns (bytes32 messageId) {
+        WETH.transferFrom(msg.sender, address(this), _amount);
+        messageId = buyTickets(_tickets, _amount, msg.value, _gasLimit, _user);
 
-    /// @dev Updates the allowlist status of a sender for transactions.
-    /// @notice This function can only be called by the owner.
-    /// @param _sender The address of the sender to be updated.
-    /// @param allowed The allowlist status to be set for the sender.
-    function allowlistSender(address _sender, bool allowed) external onlyOwner {
-        allowlistedSenders[_sender] = allowed;
+        messageIds[_user].push(messageId);
+        return(messageId);
     }
 
     function buyTickets(
         uint32[] calldata _tickets,
-        uint256 _amount
-    )
-        external
-        payable
-        validateReceiver(destinationChainContract)
-        returns (bytes32 messageId)
-    {
-        CCIPData memory data = CCIPData(
-            0,
+        uint256 _amount,
+        uint256 _CCIPFees,
+        uint256 _gasLimit,
+        address _user
+    ) internal returns (bytes32 messageId) {
+        (Client.EVM2AnyMessage memory evm2AnyMessage, CCIPData memory data) = getBuyTicketData(
             _tickets,
-            new uint256[](0),
-            0,
-            new uint32[](0)
-        );
-
-        Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessageWithToken(
-            data,
-            token,
             _amount,
-            address(0)
+            _gasLimit,
+            _user
         );
 
         IRouterClient router = IRouterClient(this.getRouter());
 
         uint256 fees = router.getFee(destinationChainSelector, evm2AnyMessage);
 
-        if (fees > msg.value)
-            revert NotEnoughBalance(msg.value, fees);
+        if (fees > _CCIPFees) revert NotEnoughBalance(_CCIPFees, fees);
 
         // approve the Router to spend tokens on contract's behalf. It will spend the amount of the given token
-        IERC20(token).approve(address(router), _amount);
+        WETH.approve(address(router), _amount);
 
         // Send the message through the router and store the returned message ID
         messageId = router.ccipSend{value: fees}(
@@ -159,22 +108,26 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
             destinationChainSelector,
             destinationChainContract,
             data,
-            token,
+            address(WETH),
             _amount,
             address(0),
             fees
         );
 
-        payable(msg.sender).transfer(msg.value - fees);
+        payable(msg.sender).transfer(_CCIPFees - fees);
 
+        messageIds[_user].push(messageId);
         return messageId;
     }
 
-    function estimateFeesBuyTickets(
+    function getBuyTicketData( //Also used for offchain calculations
         uint32[] calldata _tickets,
-        uint256 _amount
-    ) public view returns(uint256 fee) {
-        CCIPData memory data = CCIPData(
+        uint256 _amount,
+        uint256 _gasLimit,
+        address _user
+    ) public view returns (Client.EVM2AnyMessage memory evm2AnyMessage, CCIPData memory data) {
+        data = CCIPData(
+            _user,
             0,
             _tickets,
             new uint256[](0),
@@ -182,12 +135,63 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
             new uint32[](0)
         );
 
-        Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessageWithToken(
+        evm2AnyMessage = _buildCCIPMessageWithToken(
             data,
-            token,
             _amount,
-            address(0)
+            address(0),
+            _gasLimit
         );
+
+        return (evm2AnyMessage,data);
+    }
+
+    function getClaimTicketData( //Also used for offchain calculations
+        uint256 _id,
+        uint256[] calldata _ticketIds,
+        uint32[] calldata _brackets,
+        uint256 _gasLimit,
+        address _user
+    ) public view returns (Client.EVM2AnyMessage memory evm2AnyMessage, CCIPData memory data) {
+        data = CCIPData(
+            _user,
+            1,
+            new uint32[](0),
+            _ticketIds,
+            _id,
+            _brackets
+        );
+
+        evm2AnyMessage = _buildCCIPMessage(
+            data,
+            address(0),
+            _gasLimit
+        );
+
+        return (evm2AnyMessage,data);
+    }
+
+    function estimateFeeBuyTickets(
+        uint32[] calldata _tickets,
+        uint256 _amount,
+        uint256 _gasLimit,
+        address _user
+    ) public view returns (uint256 fee) {
+        CCIPData memory data = CCIPData(
+            _user,
+            0,
+            _tickets,
+            new uint256[](0),
+            0,
+            new uint32[](0)
+        );
+
+        Client.EVM2AnyMessage
+            memory evm2AnyMessage = _buildCCIPMessageWithToken(
+                data,
+                _amount,
+                address(0),
+                _gasLimit
+            );
 
         IRouterClient router = IRouterClient(this.getRouter());
 
@@ -196,17 +200,15 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
         return fee;
     }
 
-     function claimTickets(
-         uint256 _id,
+    function estimateFeeClaimTickets(
+        uint256 _id,
         uint256[] calldata _ticketIds,
-        uint32[] calldata _brackets
-    )
-        external
-        payable
-        validateReceiver(destinationChainContract)
-        returns (bytes32 messageId)
-    {
+        uint32[] calldata _brackets,
+        uint256 _gasLimit,
+        address _user
+    ) external view returns (uint256 fee) {
         CCIPData memory data = CCIPData(
+            _user,
             1,
             new uint32[](0),
             _ticketIds,
@@ -216,15 +218,44 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
 
         Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessage(
             data,
-            address(0)
+            address(0),
+            _gasLimit
+        );
+
+        IRouterClient router = IRouterClient(this.getRouter());
+
+        fee = router.getFee(destinationChainSelector, evm2AnyMessage);
+
+        return fee;
+    }
+
+    function claimTickets(
+        uint256 _id,
+        uint256[] calldata _ticketIds,
+        uint32[] calldata _brackets,
+        uint256 _gasLimit,
+        address _user
+    ) external payable returns (bytes32 messageId) {
+        CCIPData memory data = CCIPData(
+            _user,
+            1,
+            new uint32[](0),
+            _ticketIds,
+            _id,
+            _brackets
+        );
+
+        Client.EVM2AnyMessage memory evm2AnyMessage = _buildCCIPMessage(
+            data,
+            address(0),
+            _gasLimit
         );
 
         IRouterClient router = IRouterClient(this.getRouter());
 
         uint256 fees = router.getFee(destinationChainSelector, evm2AnyMessage);
 
-        if (fees > msg.value)
-            revert NotEnoughBalance(msg.value, fees);
+        if (fees > msg.value) revert NotEnoughBalance(msg.value, fees);
 
         // Send the message through the router and store the returned message ID
         messageId = router.ccipSend{value: fees}(
@@ -245,13 +276,12 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
 
         payable(msg.sender).transfer(msg.value - fees);
 
+        messageIds[_user].push(messageId);
         return messageId;
     }
 
     /// handle a received message
-    function _ccipReceive(
-        Client.Any2EVMMessage memory any2EvmMessage
-    )
+    function _ccipReceive(Client.Any2EVMMessage memory any2EvmMessage)
         internal
         override
     {}
@@ -259,20 +289,19 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
     /// @notice Construct a CCIP message.
     /// @dev This function will create an EVM2AnyMessage struct with all the necessary information for programmable tokens transfer..
     /// @param _CCIPData The CCIPData data to be sent.
-    /// @param _token The token to be transferred.
     /// @param _amount The amount of the token to be transferred.
     /// @param _feeTokenAddress The address of the token used for fees. Set address(0) for native gas.
     /// @return Client.EVM2AnyMessage Returns an EVM2AnyMessage struct which contains information for sending a CCIP message.
     function _buildCCIPMessageWithToken(
         CCIPData memory _CCIPData,
-        address _token,
         uint256 _amount,
-        address _feeTokenAddress
+        address _feeTokenAddress,
+        uint256 _gasLimit
     ) private view returns (Client.EVM2AnyMessage memory) {
         Client.EVMTokenAmount[]
             memory tokenAmounts = new Client.EVMTokenAmount[](1);
         tokenAmounts[0] = Client.EVMTokenAmount({
-            token: _token,
+            token: address(WETH),
             amount: _amount
         });
         // Create an EVM2AnyMessage struct in memory with necessary information for sending a cross-chain message
@@ -283,7 +312,7 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
                 tokenAmounts: tokenAmounts, // The amount and type of token being transferred
                 extraArgs: Client._argsToBytes(
                     // Additional arguments, setting gas limit
-                    Client.EVMExtraArgsV1({gasLimit: 200_000})
+                    Client.EVMExtraArgsV1({gasLimit: _gasLimit})
                 ),
                 // Set the feeToken to a feeTokenAddress, indicating specific asset will be used for fees
                 feeToken: _feeTokenAddress
@@ -292,7 +321,8 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
 
     function _buildCCIPMessage(
         CCIPData memory _CCIPData,
-        address _feeTokenAddress
+        address _feeTokenAddress,
+        uint256 _gasLimit
     ) private view returns (Client.EVM2AnyMessage memory) {
         // Create an EVM2AnyMessage struct in memory with necessary information for sending a cross-chain message
         return
@@ -302,10 +332,21 @@ contract ProgrammableTokenTransfers is CCIPReceiver, OwnerIsCreator {
                 tokenAmounts: new Client.EVMTokenAmount[](0),
                 extraArgs: Client._argsToBytes(
                     // Additional arguments, setting gas limit
-                    Client.EVMExtraArgsV1({gasLimit: 200_000})
+                    Client.EVMExtraArgsV1({gasLimit: _gasLimit})
                 ),
                 // Set the feeToken to a feeTokenAddress, indicating specific asset will be used for fees
                 feeToken: _feeTokenAddress
             });
+    }
+
+    function getMessageIds(address _user) external view returns (bytes32[] memory) {
+        return (messageIds[_user]);
+    }
+
+    function updateDestinationChainContract(address _destinationChainContract)
+        external
+        onlyOwner
+    {
+        destinationChainContract = _destinationChainContract;
     }
 }
